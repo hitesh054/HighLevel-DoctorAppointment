@@ -1,0 +1,19 @@
+# Dependency directories
+node_modules/
+
+# Build directories
+dist/
+build/
+
+# Optional npm cache directory
+.npm
+
+# Environment variables
+.env
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# lock files
+package-lock.json
+serviceAccountKey.json
