@@ -26,7 +26,7 @@ export const generateTimeSlots = (date: string, timezone: string) => {
   return slots;
 };
 
-export const fetchExistingSlots = async (date: string) => {
+export const fetchExistingSlots = async (date: string, timezone: string) => {
   const startOfDay = moment(date).startOf("day").toDate();
   const endOfDay = moment(date).endOf("day").toDate();
 
@@ -40,7 +40,7 @@ export const fetchExistingSlots = async (date: string) => {
   snapshot.forEach((doc) => {
     const slotTime = doc.data().dateTime.toDate(); // Assuming dateTime is a Firestore timestamp
     existingSlots.push(
-      moment(slotTime).tz("Asia/Kolkata").format("YYYY-MM-DDTHH:mm:ssZ")
+      moment(slotTime).tz(timezone).format("YYYY-MM-DDTHH:mm:ssZ")
     ); // Format to match the API output
   });
 

@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
 import moment from "moment-timezone";
 import { db } from "../config/firebase";
-import admin from "firebase-admin"; // For Firebase Admin SDK
+import admin from "firebase-admin"; 
 import { fetchExistingSlots, generateTimeSlots } from "../utils/timeSlotHelper";
+import { startOfDay, endOfDay } from "date-fns";
+import { toZonedTime } from 'date-fns-tz';
 
 interface Event {
   dateTime: string;
@@ -24,7 +26,10 @@ export const getFreeSlots = async (req: Request, res: Response) => {
     );
 
     // Fetch existing slots from Firestore
-    const existingSlots = await fetchExistingSlots(date as string);
+    const existingSlots = await fetchExistingSlots(
+      date as string,
+      timezone as string
+    );
 
     // Filter out existing slots from generated slots
     const availableSlots = generatedSlots.filter(
@@ -38,7 +43,6 @@ export const getFreeSlots = async (req: Request, res: Response) => {
   }
 };
 
-// Create a new event
 export const createEvent = async (
   req: Request,
   res: Response
@@ -46,8 +50,30 @@ export const createEvent = async (
   try {
     const { dateTime, duration }: Event = req.body;
 
-    const eventStart = moment(dateTime);
+    // Get the timezone from environment variables
+    const timezone = process.env.TIMEZONE || "US/Eastern";
+
+    // Parse the dateTime in the specified timezone
+    const eventStart = moment.tz(dateTime, timezone);
     const eventEnd = eventStart.clone().add(duration, "minutes");
+
+    if (eventStart.isBefore(moment.tz(timezone))) {
+      return res
+        .status(400)
+        .json({ message: "Cannot create an event in the past." });
+    }
+
+    const START_HOUR = parseInt(process.env.START_HOUR || "10", 10);
+    const END_HOUR = parseInt(process.env.END_HOUR || "17", 10);
+
+    const startOfDayInTZ = eventStart.clone().startOf("day").add(START_HOUR, "hours");
+    const endOfDayInTZ = eventStart.clone().startOf("day").add(END_HOUR, "hours");
+
+    if (eventStart.isBefore(startOfDayInTZ) || eventEnd.isAfter(endOfDayInTZ)) {
+      return res.status(400).json({
+        message: `Event must be between ${START_HOUR}:00 and ${END_HOUR}:00.`,
+      });
+    }
 
     // Check if any event already exists at the same time
     const snapshot = await db
@@ -71,7 +97,7 @@ export const createEvent = async (
 
     // Create new event
     await db.collection("DoctorAppointmentSlots").add({
-      dateTime: admin.firestore.Timestamp.fromDate(eventStart.toDate()), // Use Firestore Timestamp
+      dateTime: admin.firestore.Timestamp.fromDate(eventStart.toDate()), // Should be in UTC
       duration,
     });
 
@@ -83,37 +109,33 @@ export const createEvent = async (
   }
 };
 
-const startOfDay = (date: Date): Date => {
-  return new Date(
-    Date.UTC(
-      date.getUTCFullYear(),
-      date.getUTCMonth(),
-      date.getUTCDate(),
-      0,
-      0,
-      0
-    )
-  );
-};
-// Get events within a date range
 export const getEvents = async (req: Request, res: Response) => {
-  const { date } = req.query;
+  const { startDate, endDate } = req.query;
+
+  if (!startDate || !endDate) {
+    return res.status(400).json({ message: "startDate and endDate are required" });
+  }
 
   try {
+    // Convert String to Date format
+    const startParsed = new Date(startDate as string);
+    const endParsed = new Date(endDate as string);
+
+    // Set default timezone to UTC if not provided
+    const timezone =
+      typeof req.query.timezone === "string"
+        ? req.query.timezone
+        : process.env.TIMEZONE || "US/Eastern";
+
+    // Calculate start and end of the day in UTC
+    const startUTC = startOfDay(startParsed);
+    const endUTC = endOfDay(endParsed);
+
+    // Firestore query to filter events between startDate and endDate
     let query: admin.firestore.Query<admin.firestore.DocumentData> =
-      db.collection("DoctorAppointmentSlots");
-
-    if (date) {
-      const filteredDate = new Date(date as string);
-      const startDate = startOfDay(filteredDate);
-      const endDate = new Date(startDate);
-      endDate.setUTCDate(endDate.getUTCDate() + 1);
-
-      // Use Firestore query to filter by date
-      query = query
-        .where("dateTime", ">=", startDate)
-        .where("dateTime", "<", endDate);
-    }
+      db.collection("DoctorAppointmentSlots")
+        .where("dateTime", ">=", admin.firestore.Timestamp.fromDate(startUTC))
+        .where("dateTime", "<=", admin.firestore.Timestamp.fromDate(endUTC));
 
     const snapshot = await query.get();
 
@@ -121,10 +143,14 @@ export const getEvents = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "No events found." });
     }
 
-    const documents = snapshot.docs.map((doc) => ({
-      dateTime: doc.data().dateTime.toDate(), // Convert Firestore timestamp to JavaScript Date
-      duration: doc.data().duration,
-    }));
+    // Map Firestore documents to desired output format
+    const documents = snapshot.docs.map((doc) => {
+      const eventDateTime = doc.data().dateTime.toDate(); // Convert Firestore timestamp to JS Date
+      return {
+        dateTime: moment.tz(eventDateTime, timezone).format(), // Convert to specified timezone before returning
+        duration: doc.data().duration,
+      };
+    });
 
     return res.status(200).json(documents);
   } catch (error) {
