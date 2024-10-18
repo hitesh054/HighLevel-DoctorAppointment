@@ -1,11 +1,6 @@
 import moment from "moment-timezone";
 import { db } from "../config/firebase";
 
-const START_HOUR = parseInt(process.env.START_HOUR || "10", 10);
-const END_HOUR = parseInt(process.env.END_HOUR || "17", 10);
-const SLOT_DURATION = parseInt(process.env.SLOT_DURATION || "30", 10);
-
-
 export const fetchExistingSlots = async (date: string, timezone: string) => {
   // Start and end of the day in the specified timezone
   const startOfDay = moment.tz(date, timezone).startOf("day").toDate();

@@ -5,12 +5,6 @@ import admin from "firebase-admin";
 import { fetchExistingSlots } from "../utils/timeSlotHelper";
 import { startOfDay, endOfDay } from "date-fns";
 
-
-interface Event {
-  dateTime: string;
-  duration: number;
-}
-
 export const getFreeSlots = async (req: Request, res: Response) => {
   const { date } = req.query;
 
@@ -65,74 +59,71 @@ export const getFreeSlots = async (req: Request, res: Response) => {
   }
 };
 
-
-
-
-export const createEvent = async (
-  req: Request,
-  res: Response
-): Promise<Response> => {
+export const createEvent = async (req: Request, res: Response): Promise<Response> => {
   try {
-    const { dateTime, duration }: Event = req.body;
+    const { dateTime, duration, timezone } = req.body;
 
-    // Get the timezone from environment variables
-    const timezone = process.env.TIMEZONE || "US/Eastern";
-
-    // Parse the dateTime in the specified timezone
-    const eventStart = moment.tz(dateTime, timezone);
-    const eventEnd = eventStart.clone().add(duration, "minutes");
-
-    if (eventStart.isBefore(moment.tz(timezone))) {
-      return res
-        .status(400)
-        .json({ message: "Cannot create an event in the past." });
+    // Client's timezone
+    if (!timezone|| !dateTime || !duration) {
+      return res.status(400).json({ error: "timezone,dateTime,duration are required." });
     }
 
-    const START_HOUR = parseInt(process.env.START_HOUR || "10", 10);
-    const END_HOUR = parseInt(process.env.END_HOUR || "17", 10);
+    const clientTimezone = timezone;
 
-    const startOfDayInTZ = eventStart.clone().startOf("day").add(START_HOUR, "hours");
-    const endOfDayInTZ = eventStart.clone().startOf("day").add(END_HOUR, "hours");
+    // Doctor's timezone from environment variables
+    const doctorTimezone = process.env.TIMEZONE || "US/Eastern";
 
-    if (eventStart.isBefore(startOfDayInTZ) || eventEnd.isAfter(endOfDayInTZ)) {
+    // Parse the dateTime in the client's timezone
+    const eventStart = moment.tz(dateTime, clientTimezone);
+    const eventEnd = eventStart.clone().add(duration, "minutes");
+
+    // Convert event times to the doctor's timezone for validation
+    const eventStartInDoctorTimezone = eventStart.clone().tz(doctorTimezone);
+    const eventEndInDoctorTimezone = eventEnd.clone().tz(doctorTimezone);
+
+    // Doctor's availability in the doctor's timezone
+    const START_HOUR = parseInt(process.env.START_HOUR || "8", 10); // Doctor's start time (e.g., 8:00 AM)
+    const END_HOUR = parseInt(process.env.END_HOUR || "17", 10); // Doctor's end time (e.g., 5:00 PM)
+
+    // Define the start and end of the doctor's day
+    const startOfDayInDoctorTimezone = eventStartInDoctorTimezone.clone().startOf("day").add(START_HOUR, "hours");
+    const endOfDayInDoctorTimezone = eventStartInDoctorTimezone.clone().startOf("day").add(END_HOUR, "hours");
+
+    // Check if the event falls within the doctor's working hours in their timezone
+    if (
+      eventStartInDoctorTimezone.isBefore(startOfDayInDoctorTimezone) ||
+      eventEndInDoctorTimezone.isAfter(endOfDayInDoctorTimezone)
+    ) {
       return res.status(400).json({
-        message: `Event must be between ${START_HOUR}:00 and ${END_HOUR}:00.`,
+        message: `Event must be between ${START_HOUR}:00 and ${END_HOUR}:00 in ${doctorTimezone}.`,
       });
     }
 
     // Check if any event already exists at the same time
     const snapshot = await db
       .collection("DoctorAppointmentSlots")
-      .where(
-        "dateTime",
-        ">=",
-        admin.firestore.Timestamp.fromDate(eventStart.toDate())
-      )
-      .where(
-        "dateTime",
-        "<",
-        admin.firestore.Timestamp.fromDate(eventEnd.toDate())
-      )
+      .where("dateTime", ">=", admin.firestore.Timestamp.fromDate(eventStart.toDate())) // Store in UTC
+      .where("dateTime", "<", admin.firestore.Timestamp.fromDate(eventEnd.toDate()))
       .get();
 
-    // If there's already an event in the desired time range, return an error
     if (!snapshot.empty) {
       return res.status(422).json({ message: "Slot is already booked." });
     }
 
-    // Create new event
+    // Create the event in Firestore
     await db.collection("DoctorAppointmentSlots").add({
-      dateTime: admin.firestore.Timestamp.fromDate(eventStart.toDate()), // Should be in UTC
+      dateTime: admin.firestore.Timestamp.fromDate(eventStart.toDate()), // Store in UTC
       duration,
     });
 
-    // Return success response after creating the event
     return res.status(200).json({ message: "Event created successfully." });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: "Internal Server Error" });
   }
 };
+
+
 
 export const getEvents = async (req: Request, res: Response) => {
   const { startDate, endDate } = req.query;
