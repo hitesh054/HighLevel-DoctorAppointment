@@ -12,13 +12,17 @@ interface Event {
 }
 
 export const getFreeSlots = async (req: Request, res: Response) => {
-  const { date, timezone = "America/Los_Angeles" } = req.query;
+  const { date } = req.query;
 
-  if (!date || !timezone) {
-    return res.status(400).json({ error: "Date and timezone are required." });
+  if (!date) {
+    return res.status(400).json({ error: "Date is are required." });
   }
 
   try {
+    const timezone =
+      typeof req.query.timezone === "string"
+        ? req.query.timezone
+        : process.env.TIMEZONE || "US/Eastern";
     // Generate initial time slots
     const generatedSlots = generateTimeSlots(
       date as string,
