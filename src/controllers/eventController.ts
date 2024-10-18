@@ -2,9 +2,9 @@ import { Request, Response } from "express";
 import moment from "moment-timezone";
 import { db } from "../config/firebase";
 import admin from "firebase-admin"; 
-import { fetchExistingSlots, generateTimeSlots } from "../utils/timeSlotHelper";
+import { fetchExistingSlots } from "../utils/timeSlotHelper";
 import { startOfDay, endOfDay } from "date-fns";
-import { toZonedTime } from 'date-fns-tz';
+
 
 interface Event {
   dateTime: string;
@@ -15,7 +15,7 @@ export const getFreeSlots = async (req: Request, res: Response) => {
   const { date } = req.query;
 
   if (!date) {
-    return res.status(400).json({ error: "Date is are required." });
+    return res.status(400).json({ error: "Date is required." });
   }
 
   try {
@@ -23,29 +23,50 @@ export const getFreeSlots = async (req: Request, res: Response) => {
       typeof req.query.timezone === "string"
         ? req.query.timezone
         : process.env.TIMEZONE || "US/Eastern";
-    // Generate initial time slots
-    const generatedSlots = generateTimeSlots(
-      date as string,
-      timezone as string
-    );
+
+        const startHour = process.env.START_HOUR || '08:00';
+        const endHour = process.env.END_HOUR || '17:00';
+    
+        // Define the doctor's availability hours in US/Eastern timezone
+        const startEastern = moment.tz(date + ' ' + startHour, "US/Eastern");
+        const endEastern = moment.tz(date + ' ' + endHour, "US/Eastern");
+
+    // Generate initial time slots in US/Eastern timezone
+    const generatedSlots: string[] = [];
+    let currentSlot = startEastern.clone();
+
+    while (currentSlot.isBefore(endEastern)) {
+      generatedSlots.push(currentSlot.format());
+      currentSlot.add(30, 'minutes'); // Increment by 30 minutes
+    }
 
     // Fetch existing slots from Firestore
-    const existingSlots = await fetchExistingSlots(
-      date as string,
-      timezone as string
+    const existingSlots = await fetchExistingSlots(date as string, timezone as string);
+
+    // Convert existing slots to UTC for accurate comparison
+    const existingSlotsInUTC = existingSlots.map(slot => 
+      moment.tz(slot, timezone).utc().format()
     );
 
     // Filter out existing slots from generated slots
     const availableSlots = generatedSlots.filter(
-      (slot) => !existingSlots.includes(slot)
+      (slot) => !existingSlotsInUTC.includes(moment.tz(slot, "US/Eastern").utc().format())
     );
 
-    return res.status(200).json(availableSlots);
+    // Format available slots in requested timezone
+    const formattedSlots = availableSlots.map(slot => {
+      return moment.tz(slot, "US/Eastern").tz(timezone).format();
+    });
+
+    return res.status(200).json(formattedSlots);
   } catch (error) {
     console.error("Error generating slots:", error);
     return res.status(500).json({ error: "Failed to generate slots" });
   }
 };
+
+
+
 
 export const createEvent = async (
   req: Request,
