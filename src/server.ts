@@ -10,7 +10,7 @@ dotenv.config();
 const app = express();
 app.use(bodyParser.json());
 
-// Mount the event routes
+
 app.use("/api", eventRoutes);
 app.use("/health", healthCheck);
 app.listen(PORT, () => {
