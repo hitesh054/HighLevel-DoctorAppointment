@@ -5,6 +5,8 @@ import admin from "firebase-admin";
 import { fetchExistingSlots } from "../utils/timeSlotHelper";
 import { startOfDay, endOfDay } from "date-fns";
 
+
+
 export const getFreeSlots = async (req: Request, res: Response) => {
   const { date } = req.query;
 
@@ -12,48 +14,70 @@ export const getFreeSlots = async (req: Request, res: Response) => {
     console.error("Date parameter is missing in getFreeSlots.");
     return res.status(400).json({ error: "Date is required." });
   }
-  const clientTimezone = req.query.timezone?.toString() || process.env.TIMEZONE || "US/Eastern";
 
+  const clientTimezone = req.query.timezone?.toString() || process.env.TIMEZONE || "US/Eastern";
   if (!req.query.timezone) {
     console.warn("Timezone not provided, using default timezone (US/Eastern).");
   }
+
   try {
     const doctorsTimezone = process.env.TIMEZONE || "US/Eastern";
     const startHour = process.env.START_HOUR || '08:00';
     const endHour = process.env.END_HOUR || '17:00';
-    const slotDuration = process.env.SLOT_DURATION || 30;
+    const slotDuration = Number(process.env.SLOT_DURATION || 30);
 
-    // Define the doctor's availability hours in US/Eastern timezone
-    const startEastern = moment.tz(date + ' ' + startHour, doctorsTimezone);
-    const endEastern = moment.tz(date + ' ' + endHour, doctorsTimezone);
+    // Define the doctor's availability hours in env defined timezone
+    const startEastern = moment.tz(`${date} ${startHour}`, doctorsTimezone);
+    const endEastern = moment.tz(`${date} ${endHour}`, doctorsTimezone);
 
     console.info(`Generating time slots between ${startHour} and ${endHour} for ${date} in ${clientTimezone}.`);
 
-    const generatedSlots: string[] = [];
+    const generatedSlots: { start: string; end: string }[] = [];
     let currentSlot = startEastern.clone();
 
     while (currentSlot.isBefore(endEastern)) {
-      generatedSlots.push(currentSlot.format());
-      currentSlot.add(Number(slotDuration), 'minutes'); 
+      const nextSlot = currentSlot.clone().add(slotDuration, 'minutes');
+      generatedSlots.push({
+        start: currentSlot.format(),
+        end: nextSlot.format()
+      });
+      currentSlot = nextSlot;
     }
 
-    // Fetch existing slots from Firestore
     const existingSlots = await fetchExistingSlots(date as string, clientTimezone as string);
     console.info(`Existing slots for ${date}: ${JSON.stringify(existingSlots)}`);
 
     // Convert existing slots to UTC for accurate comparison
-    const existingSlotsInUTC = existingSlots.map(slot => 
-      moment.tz(slot, doctorsTimezone).utc().format()
-    );
+    // const existingSlotsInUTC = existingSlots.map(slot => {
+    //   const startUTC = moment.tz(slot.start, doctorsTimezone).utc(); 
+    //   const endUTC = moment.tz(slot.end, doctorsTimezone).utc();   
 
-    // Filter out existing slots from generated slots
-    const availableSlots = generatedSlots.filter(
-      (slot) => !existingSlotsInUTC.includes(moment.tz(slot, doctorsTimezone).utc().format())
-    );
+    //   return {
+    //     start: startUTC.format(), 
+    //     end: endUTC.format(),
+    //   };
+    // });
+
+    // Filter out any generated slot that overlaps with existing slots
+    const availableSlots = generatedSlots.filter(generatedSlot => {
+      const generatedStartUTC = moment.tz(generatedSlot.start, doctorsTimezone).utc();
+      const generatedEndUTC = moment.tz(generatedSlot.end, doctorsTimezone).utc();
+  
+      return !existingSlots.some(existingSlot => {
+        const existingStartUTC = moment(existingSlot.start);
+        const existingEndUTC = moment(existingSlot.end);
+    
+        return (
+          generatedStartUTC.isBefore(existingEndUTC) &&
+          generatedEndUTC.isAfter(existingStartUTC)
+        );
+      });
+    });
+    
 
     // Format available slots in requested timezone
     const formattedSlots = availableSlots.map(slot => {
-      return moment.tz(slot, doctorsTimezone).tz(clientTimezone).format();
+      return moment.tz(slot.start, doctorsTimezone).tz(clientTimezone).format();
     });
 
     console.info(`Available slots for ${date}: ${JSON.stringify(formattedSlots)}`);
@@ -64,7 +88,6 @@ export const getFreeSlots = async (req: Request, res: Response) => {
     return res.status(500).json({ error: "Failed to generate slots" });
   }
 };
-
 
 export const createEvent = async (req: Request, res: Response): Promise<Response> => {
   try {
@@ -93,6 +116,7 @@ export const createEvent = async (req: Request, res: Response): Promise<Response
     const startOfDayInDoctorTimezone = eventStartInDoctorTimezone.clone().startOf("day").add(START_HOUR, "hours");
     const endOfDayInDoctorTimezone = eventStartInDoctorTimezone.clone().startOf("day").add(END_HOUR, "hours");
 
+    // Check if the event is within the doctor's working hours
     if (
       eventStartInDoctorTimezone.isBefore(startOfDayInDoctorTimezone) ||
       eventEndInDoctorTimezone.isAfter(endOfDayInDoctorTimezone)
@@ -100,22 +124,21 @@ export const createEvent = async (req: Request, res: Response): Promise<Response
       console.warn(`Event time is outside of working hours in ${doctorTimezone}.`);
       return res.status(400).json({
         message: `Event must be between ${START_HOUR}:00 and ${END_HOUR}:00 in ${doctorTimezone}.`,
-      }); 
+      });
     }
 
-    // Check if the slot is already booked
+    // Check if any existing slots overlap with the new event
     const snapshot = await db
       .collection("DoctorAppointmentSlots")
-      .where("dateTime", ">=", admin.firestore.Timestamp.fromDate(eventStart.toDate()))
-      .where("dateTime", "<", admin.firestore.Timestamp.fromDate(eventEnd.toDate()))
+      .where("dateTime", "<", admin.firestore.Timestamp.fromDate(eventEnd.toDate())) // End time check
+      .where("dateTime", ">=", admin.firestore.Timestamp.fromDate(eventStart.clone().subtract(duration, 'minutes').toDate()))
       .get();
 
     if (!snapshot.empty) {
-      console.warn(`Slot at ${eventStart} is already booked.`);
-      return res.status(422).json({ message: "Slot is already booked." });
+      console.warn(`Slot at ${eventStart} overlaps with an existing booking.`);
+      return res.status(422).json({ message: "Slot is already booked or overlaps with another booking." });
     }
 
-    // Create the event in Firestore
     await db.collection("DoctorAppointmentSlots").add({
       dateTime: admin.firestore.Timestamp.fromDate(eventStart.toDate()),
       duration,
@@ -129,7 +152,6 @@ export const createEvent = async (req: Request, res: Response): Promise<Response
   }
 };
 
-
 export const getEvents = async (req: Request, res: Response) => {
   const { startDate, endDate } = req.query;
 
@@ -141,6 +163,11 @@ export const getEvents = async (req: Request, res: Response) => {
   try {
     const startParsed = new Date(startDate as string);
     const endParsed = new Date(endDate as string);
+    if (startParsed > endParsed) {
+      console.warn("startDate must be before endDate.");
+      return res.status(400).json({ message: "startDate must be before endDate." });
+    }
+
     const timezone = typeof req.query.timezone === "string" ? req.query.timezone : process.env.TIMEZONE || "US/Eastern";
     if (!req.query.timezone) {
       console.warn("Timezone not provided, using default timezone (US/Eastern).");
